@@ -1,0 +1,84 @@
+﻿@page "/agent"
+@using OpenAI
+@using Microsoft.Agents.AI
+@using OpenAI.Chat
+@using OpenAI.Responses
+@using Microsoft.Extensions.AI
+
+<div class="mb-3">
+    <label for="userInput">Enter your Question</label>
+    <input @bind="userPrompt" id="userInput" class="form-control" />
+    <button @onclick="SubmitPrompt" class="btn btn-primary mt-3">@buttonText</button>
+    <button @onclick="ClearAll" class="btn btn-secondary mt-3">Clear All</button>
+</div>
+
+@if (responseText != null)
+{
+    <div class="alert alert-info">
+        <p>@((MarkupString)responseText)</p>
+    </div>
+}
+
+
+
+@code {
+    private string userPrompt = string.Empty;
+    private string? responseText;
+    private string buttonText = "Send to ChatGPT";
+
+    const string apiKey = "API_KEY";
+    const string model = "gpt-4o-mini";
+
+    private async Task SubmitPrompt()
+    {
+        if (string.IsNullOrWhiteSpace(userPrompt))
+        {
+            responseText = "<p style='color:red;'>Please enter a valid question.</p>";
+            return;
+        }
+
+        buttonText = "Sending...";
+        responseText = string.Empty;
+        StateHasChanged();
+
+        try
+        {
+            OpenAIClient client = new OpenAIClient(apiKey);
+
+            // 2. Responses client
+#pragma warning disable OPENAI001
+            var responsesClient = client.GetResponsesClient();
+#pragma warning restore OPENAI001
+
+            AIAgent agent = responsesClient.AsAIAgent(
+                model: model,
+                name: "Test",
+                instructions: "You are a general knowledge expert. Always format every response as HTML.",
+                 tools: [new HostedWebSearchTool()]
+            );
+
+            // Streaming response
+            await foreach (AgentResponseUpdate update in agent.RunStreamingAsync(userPrompt))
+            {
+                responseText += update.Text;
+                await InvokeAsync(StateHasChanged);
+             
+            }
+        }
+        catch (Exception ex)
+        {
+            responseText = $"<p style='color:red;'>MyError: {System.Net.WebUtility.HtmlEncode(ex.Message)}</p>";
+        }
+        finally
+        {
+            buttonText = "Send to ChatGPT";
+        }
+    }
+
+    private void ClearAll()
+    {
+        userPrompt = string.Empty;
+        responseText = null;
+    }
+
+}
