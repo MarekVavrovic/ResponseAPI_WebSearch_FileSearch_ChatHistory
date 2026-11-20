@@ -1,0 +1,190 @@
+﻿@page "/filesearch"
+@using OpenAI
+@using Microsoft.Agents.AI
+@using OpenAI.Responses
+
+@*Needed to reference OpenAI FileSearch Tool*@
+@using Microsoft.Extensions.AI
+
+@using OpenAI.Files
+@using OpenAI.VectorStores
+@using System.ClientModel
+@*Use for ClientResult reference when accessing Files or Vector stores from cloud service*@
+
+<div class="card border-primary mb-4">
+    <div class="card-header bg-primary text-white">
+        <strong>Response API ... File Search Tool</strong>
+    </div>
+    
+    <div class="mb-2">
+        <strong>Page Objectives</strong>
+        <ul>
+            <li>Demonstrate the use of OpenAI's new <b>File Search Tool</b> for Retrieval-Augmented Generation (RAG) applications.</li>
+            <li>Showcase the process of uploading a PDF file to OpenAI, storing it securely in your account.</li>
+            <li>Explain how the uploaded file is indexed into a <b>vector store</b> to enable efficient semantic search.</li>
+            <li>Allow users to submit queries about the PDF, which are answered using the File Search Tool and the indexed content.</li>
+            <li>Highlight the workflow: file upload &rarr; vector store creation &rarr; file indexing &rarr; query processing &rarr; result display.</li>
+            <li>Note: Usage of file storage and vector store operations may incur additional costs beyond standard GPT model usage.</li>
+        </ul>
+    </div>
+    
+</div>
+
+<div class="mb-3">
+    <label for="userInput">Enter Query about selected PDF file</label>
+    <input @bind="userPrompt" id="userInput" class="form-control" />
+    <button @onclick="SubmitPrompt" class="btn btn-primary mt-3">@buttonText</button>
+    <button @onclick="ClearAll" class="btn btn-secondary mt-3">Clear All</button>
+</div>
+
+@if (!string.IsNullOrEmpty(responseText))
+{
+    <div class="alert alert-info">
+        <p>@((MarkupString)responseText)</p>
+    </div>
+}
+
+
+@code {
+    private string userPrompt = string.Empty;
+    private string? responseText;
+    private string buttonText = "Send to ChatGPT";
+
+    const string apiKey = "API_KEY";
+    const string model = "gpt-4o-mini";
+
+
+    private async Task SubmitPrompt()
+    {
+        if (string.IsNullOrWhiteSpace(userPrompt))
+        {
+            responseText = "<p style='color:red;'>Please enter a valid question.</p>";
+            return;
+        }
+
+        responseText = null;
+        buttonText = "Sending...";
+
+        OpenAI.OpenAIClient client = new OpenAIClient(apiKey);
+
+#pragma warning disable OPENAI001
+        OpenAIFileClient fileClient = client.GetOpenAIFileClient();             //File client for uploading files
+        VectorStoreClient vectorStoreClient = client.GetVectorStoreClient();    //Vector store client for creating vector stores
+
+        string? fileId = null;
+        string? vectorStoreId = null;
+
+        try
+        {
+            responseText = "<p>Uploading file...</p>";
+            StateHasChanged();
+
+            //STEP 1: Upload a file to OpenAI located
+            string filename = "EmergencyKit.pdf";
+            byte[] fileBytes = await File.ReadAllBytesAsync(Path.Combine("wwwroot", "data", filename));
+            ClientResult<OpenAIFile> uploadedFile = await fileClient.UploadFileAsync(new BinaryData(fileBytes), filename, FileUploadPurpose.Assistants);
+
+            //Check if file upload was successful
+            if (uploadedFile == null || uploadedFile.Value == null)
+            {
+                responseText = "<p style='color:red;'>File upload failed. Please check your API key and file path.</p>";
+                return;
+            }
+            //Get the uploaded file ID
+            fileId = uploadedFile.Value.Id;
+
+            responseText = "<p>Creating vector store...</p>";
+            StateHasChanged();
+
+            //STEP 2: Create a vector store based on the uploaded file (use the fileId)
+            ClientResult<VectorStore> vectorStore = await vectorStoreClient.CreateVectorStoreAsync(options: new VectorStoreCreationOptions
+            {
+                Name = "MyVectorStore",
+                FileIds = { fileId }
+            });
+            //store the vector store ID
+            vectorStoreId = vectorStore.Value.Id;
+
+            responseText = "<p>Waiting for file indexing to complete...</p>";
+            StateHasChanged();
+
+            //STEP 3: Wait for the file to be indexed into the vector store
+            bool isReady = false;
+            int maxAttempts = 60;
+            int attempts = 0;
+
+            while (!isReady && attempts < maxAttempts)
+            {
+                await Task.Delay(2000);
+                ClientResult<VectorStore> storeStatus = await vectorStoreClient.GetVectorStoreAsync(vectorStoreId);
+
+                if (storeStatus.Value.FileCounts.Completed > 0 && storeStatus.Value.FileCounts.InProgress == 0)
+                {
+                    isReady = true;
+                }
+                else if (storeStatus.Value.FileCounts.Failed > 0)
+                {
+                    responseText = "<p style='color:red;'>Vector store file indexing failed.</p>";
+                    return;
+                }
+
+                attempts++;
+                responseText = "<p>Waiting for file indexing... (attempt " + attempts + "/" + maxAttempts + ")</p>";
+                StateHasChanged();
+            }   // <-- the loop ends here, BEFORE STEP 4
+
+            if (!isReady)
+            {
+                responseText = "<p style='color:red;'>Timeout waiting for file indexing.</p>";
+                return;
+            }
+
+            responseText = "<p>Processing your query...</p>";
+            StateHasChanged();
+
+            //STEP 4: Create the agent and run the query (once, after indexing is done)
+            AIAgent agent = client
+                .GetResponsesClient()
+                .AsAIAgent(
+                    model: model,
+                    instructions: "You are a helpful assistant. Use the file search tool to answer questions based on the uploaded document. " +
+                                  "Only use tools, never your world knowledge. If you cannot find any relevant information, say 'I could not find any information on that topic.'",
+                    tools:
+                    [
+                        new HostedFileSearchTool
+            {
+                Inputs = [new HostedVectorStoreContent(vectorStoreId)]
+            }
+                    ]);
+
+            AgentResponse response = await agent.RunAsync(userPrompt + ". Display the results nicely formatted in HTML.");
+
+            responseText = response.Text;   // the final answer is the last thing set
+            StateHasChanged();
+
+        }
+        catch (Exception ex)
+        {
+            responseText = $"<p style='color:red;'>Error: {ex.Message}</p>";
+        }
+        finally
+        {
+            try { if (vectorStoreId != null) await vectorStoreClient.DeleteVectorStoreAsync(vectorStoreId); } catch { }
+            try { if (fileId != null) await fileClient.DeleteFileAsync(fileId); } catch { }
+
+            buttonText = "Send to ChatGPT";
+            StateHasChanged();   // so the button text resets immediately
+        }
+
+#pragma warning restore OPENAI001
+    }
+
+    private void ClearAll()
+    {
+        userPrompt = string.Empty;
+        responseText = null;
+    }
+
+
+}
+

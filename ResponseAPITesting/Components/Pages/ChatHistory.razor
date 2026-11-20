@@ -1,0 +1,212 @@
+﻿@page "/chathistory"
+@using OpenAI
+@using OpenAI.Responses
+@using Microsoft.Agents.AI
+
+@*Needed to reference ChatOptions for the userPostFollowPrompt*@
+@using Microsoft.Extensions.AI
+<div class="card border-primary mb-4">
+    <div class="card-header bg-primary text-white">
+        <strong>Response API ... Conversations</strong>
+    </div>
+    
+    <div class="mb-2">
+        <ul>
+            <li>Demonstrate the use of OpenAI Responses ... Conversations </li>
+            <li>
+                This mirrors the concept of Persistence that we covered in Lecture 209 (BlazorMSagentFrameworkPersistence)
+                where we used a ChatClient as opposed to the Response API.
+            </li>
+            <li>We will start a conversation with multiple prompts and then continue the conversation with a follow up prompt</li>
+            <li>
+                We still make use the AgentThread and  AgentRunResponse like we did in a prior example BUT we now take adavantage of the
+                ResponseId property to return to a conversation and continue it with a new prompt much later in time.
+            </li>
+            
+        </ul>
+    </div>
+    
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+
+        @*Only include this section for Hands on Demo*@
+        <div class="mb-3">
+            <label for="userInput">Enter Query ... and follow up queries</label>
+            <input @bind="userPrompt1" id="userInput" placeholder="Who is Elon Musk" class="form-control" />
+            <input @bind="userPrompt2" id="userInput2" placeholder="What is his current wealth" class="form-control mt-2" />
+            <input @bind="userContinuedPrompt" id="userInput3" placeholder="Nationality ... DON'T make an entry here if testing Post Followup on the right " class="form-control mt-2" />
+            <button @onclick="SubmitPrompt" class="btn btn-primary mt-3">@buttonText</button>
+            <button @onclick="ClearAll" class="btn btn-secondary mt-3">Clear All</button>
+        </div>
+
+    </div>
+    <div class="col-md-6">
+        <div class="mb-3">
+            <label for="userPostFollowInput">Post Conversation Followup</label>
+            <input @bind="userPostFollowPrompt" id="userPostFollowInput" placeholder="Enter follow-up ... assuming third prompt on left is empty" class="form-control" />
+            <button @onclick="SubmitFollowupPrompt" class="btn btn-info mt-3">@followupButtonText</button>
+        </div>
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(responseText))
+{
+    <div class="alert alert-info">
+        <p>@((MarkupString)responseText)</p>
+    </div>
+}
+
+
+
+@code {
+
+    private string userPrompt1 = null;
+    private string userPrompt2 = null;
+    private string userContinuedPrompt = null;
+    private string userPostFollowPrompt = null;
+
+    //To hold the ConversationId for continuing conversations and follow-ups
+    private string? responseId = null;
+
+    private string? responseText;
+    private string buttonText = "Send to ChatGPT";
+    private string followupButtonText = "Submit Follow-up";
+
+    const string apiKey = "API_KEY";
+    const string model = "gpt-4o-mini";
+
+    private async Task SubmitPrompt()
+    {
+        if (string.IsNullOrWhiteSpace(userPrompt1) || string.IsNullOrWhiteSpace(userPrompt2))
+        {
+            responseText = "<p style='color:red;'>Please enter valid starting questions for first two prompts.</p>";
+            return;
+        }
+
+        responseText = null;
+        responseId = null;
+        buttonText = "Sending...";
+
+        
+        // Initialize OpenAI client
+        OpenAI.OpenAIClient client = new OpenAIClient(apiKey);
+
+#pragma warning disable OPENAI001
+        // Create the Response client
+        ResponsesClient responseClient = client.GetResponsesClient();
+        
+        //Create an AI Agent
+        AIAgent agent = responseClient.AsAIAgent(model: model, name: "Test", instructions: "You are a Nice AI");
+
+        //Create a new agent session to maintain context across multiple prompts
+        AgentSession session = await agent.CreateSessionAsync();
+
+        //Run the first two prompts in the same thread to maintain context
+        AgentResponse response1 = await agent.RunAsync(userPrompt1 + "display the results nicely formated in HTML in 50 words or less", session);
+        responseText = response1.Text + "<hr/>";
+        AgentResponse response2 = await agent.RunAsync(userPrompt2 + "display the results nicely formated in HTML in 50 words or less", session);
+        responseText += response2.Text + "<hr/>";
+
+        // we use the ConversationId from the last response and then continue the conversation with a new prompt 2
+        responseId = response2.ResponseId;
+
+        //make sure userContinuedPrompt is not empty otherwise we don't continue the conversation here
+        if (string.IsNullOrWhiteSpace(userContinuedPrompt))
+        {
+            buttonText = "Send to ChatGPT";
+            return;
+        }
+        
+        //Here we use the standard AgentRunResponse but pass in ChatOptions with the ConversationId to continue the conversation
+        AgentResponse response3 = await agent.RunAsync(userContinuedPrompt, options: new ChatClientAgentRunOptions
+        {
+            ChatOptions = new ChatOptions
+            {
+                ConversationId = responseId
+            }
+
+        });
+
+        responseText += response3.Text;
+
+        buttonText = "Send to ChatGPT";
+
+
+#pragma warning restore OPENAI001
+    }
+
+    //Method to handle Post follow-up prompt on right side
+    private async Task SubmitFollowupPrompt()
+    {
+
+        //make sure userPostFollowPrompt is not empty
+        if (string.IsNullOrWhiteSpace(userPostFollowPrompt))
+        {
+            responseText = "<p style='color:red;'>Please enter a valid Post follow-up question.</p>";
+            return;
+        }
+
+        //make sure user did not enter anything in the continued prompt on the left side
+        //otherwise we can't test Post Follow-up properly ... defeats the purpose of the test
+        if (!string.IsNullOrWhiteSpace(userContinuedPrompt))
+        {
+            responseText = "<p style='color:red;'>Please Restart the conversation on the left and make sure to clear the Continued prompt (third input)  on the left side before testing Post Follow-up</p>";
+            return;
+        }
+
+        //check to make sure responseId is not null ... so we have a prior conversation to continue
+        if (string.IsNullOrWhiteSpace(responseId))
+        {
+            responseText = "<p style='color:red;'>No prior conversation found. Please start a conversation first on the left side</p>";
+            return;
+        }
+        
+        followupButtonText = "Sending...";
+
+        // Initialize OpenAI client
+        OpenAI.OpenAIClient client = new OpenAIClient(apiKey);
+
+#pragma warning disable OPENAI001
+
+        // Create the Response client
+        ResponsesClient responseClient = client.GetResponsesClient();
+        
+        //Create an AI Agent
+        AIAgent agent = responseClient.AsAIAgent(model: model, name: "Tester", instructions: "You are a Nice AI");
+
+        
+        //Here we use the standard AgentResponse but pass in ChatOptions with the ConversationId to continue the conversation
+        //where the responseId was stored from prior conversation on the left side
+        AgentResponse response3 = await agent.RunAsync(userPostFollowPrompt, options: new ChatClientAgentRunOptions
+        {
+            ChatOptions = new ChatOptions
+            {
+                ConversationId = responseId
+            }
+
+        });
+
+        responseText += response3.Text;
+
+        followupButtonText = "Submit Follow-up";
+
+#pragma warning restore OPENAI001
+
+    }
+
+
+
+
+    private void ClearAll()
+    {
+        userPrompt1 = string.Empty;
+        userPrompt2 = string.Empty;
+        userContinuedPrompt = string.Empty;
+        userPostFollowPrompt = string.Empty;
+        responseText = null;
+        responseId = null;
+    }
+
+}
